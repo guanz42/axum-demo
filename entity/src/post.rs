@@ -1,4 +1,4 @@
-use sea_orm::{entity::prelude::*, DeleteMany};
+use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq, Deserialize, Serialize)]

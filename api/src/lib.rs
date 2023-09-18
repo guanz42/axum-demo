@@ -1,8 +1,9 @@
 mod routes;
 
-use std::{env, net::SocketAddr, str::FromStr};
+use std::{env, net::SocketAddr, str::FromStr, time::Duration};
 
 use axum::{
+    error_handling::HandleErrorLayer,
     extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
@@ -14,6 +15,8 @@ use routes::hello;
 use serde::Deserialize;
 use service::sea_orm::{Database, DatabaseConnection};
 use service::{Mutation as MutationCore, Query as QueryCore};
+use tower::{BoxError, ServiceBuilder};
+use tower_http::trace::TraceLayer;
 
 #[derive(Clone)]
 struct AppState {
@@ -51,6 +54,22 @@ async fn start() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/hello", get(hello::hello_world))
         .nest("/api", api_posts)
+        .layer(
+            ServiceBuilder::new()
+                .layer(HandleErrorLayer::new(|error: BoxError| async move {
+                    if error.is::<tower::timeout::error::Elapsed>() {
+                        Ok(StatusCode::REQUEST_TIMEOUT)
+                    } else {
+                        Err((
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("Unhandled internal error: {}", error),
+                        ))
+                    }
+                }))
+                .timeout(Duration::from_secs(10))
+                .layer(TraceLayer::new_for_http())
+                .into_inner(),
+        )
         .with_state(state);
 
     let addr = SocketAddr::from_str(&server_url).unwrap();
@@ -65,10 +84,7 @@ struct Params {
     page_size: Option<u64>,
 }
 
-async fn list_posts(
-    state: State<AppState>,
-    Query(params): Query<Params>,
-) -> Result<impl IntoResponse, (StatusCode, &'static str)> {
+async fn list_posts(state: State<AppState>, Query(params): Query<Params>) -> impl IntoResponse {
     let page = params.page.unwrap_or(1);
     let page_size = params.page_size.unwrap_or(5);
 
@@ -76,41 +92,34 @@ async fn list_posts(
         .await
         .expect("Cannot find posts in page");
 
-    Ok(Json(posts))
+    Json(posts)
 }
 
-async fn create_post(
-    state: State<AppState>,
-    Json(body): Json<post::Model>,
-) -> Result<impl IntoResponse, (StatusCode, &'static str)> {
+async fn create_post(state: State<AppState>, Json(body): Json<post::Model>) -> impl IntoResponse {
     MutationCore::create_post(&state.conn, body)
         .await
-        .expect("could not insert post");
-
-    Ok(())
+        .expect("cannot create post");
+    StatusCode::CREATED
 }
 
 async fn update_post(
     state: State<AppState>,
     Path(id): Path<i32>,
     Json(body): Json<post::Model>,
-) -> Result<impl IntoResponse, (StatusCode, &'static str)> {
+) -> impl IntoResponse {
     MutationCore::update_post_by_id(&state.conn, id, body)
         .await
         .expect("could not update post");
 
-    Ok(())
+    StatusCode::OK
 }
 
-async fn get_post(
-    state: State<AppState>,
-    Path(id): Path<i32>,
-) -> Result<impl IntoResponse, (StatusCode, &'static str)> {
+async fn get_post(state: State<AppState>, Path(id): Path<i32>) -> impl IntoResponse {
     let post = QueryCore::find_post_by_id(&state.conn, id)
         .await
         .expect("could not find post");
 
-    Ok(Json(post))
+    Json(post)
 }
 
 async fn delete_post(
